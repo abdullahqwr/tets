@@ -1,0 +1,22 @@
+server:
+  port: 8080
+spring:
+  application:
+    name: cloud-backend
+  datasource:
+    url: ${DATASOURCE_URL:jdbc:sqlserver://localhost:1433;database=app}
+    username: ${DATASOURCE_USERNAME:sa}
+    password: ${DATASOURCE_PASSWORD:ChangeMe123!}
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: cloud-backend
