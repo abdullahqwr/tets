@@ -20,6 +20,10 @@ livenessProbe:
 readinessProbe:
   path: /actuator/health/readiness
   initialDelaySeconds: 10
+startupProbe:
+  path: /actuator/health/startup
+  initialDelaySeconds: 5
+  periodSeconds: 10
 autoscaling:
   enabled: true
   minReplicas: 3
@@ -30,6 +34,10 @@ envs:
   DATASOURCE_USERNAME: ""
 secrets:
   existingSecret: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
 
 azureWorkloadIdentity:
   clientId: ""

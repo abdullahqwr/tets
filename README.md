@@ -54,6 +54,8 @@ Ingress Controller]
 - **Azure Key Vault + CSI Driver** ensures that secrets are stored centrally and mounted into pods securely.
 - **Azure Container Registry (ACR)** stores signed container images that are deployed via GitHub Actions pipelines.
 - **Observability stack (kube-prometheus-stack)** supplies metrics, dashboards, and alerting integrated with Log Analytics and Application Insights.
+- **PodDisruptionBudgets and startup probes** protect availability during maintenance and slow warm-ups, keeping at least two replicas online per workload.
+- **GitHub Actions environment gates** require staging approval before production, ensuring human-in-the-loop promotion of the exact container image.
 
 ## Repository Structure
 
@@ -75,14 +77,17 @@ Ingress Controller]
 
 ## Automation & Workflows
 - **Terraform** workflow runs on pull requests (`plan`) and on `main` with manual approval (`apply`). State is stored remotely in Azure Storage and authenticated using OpenID Connect.
-- **Frontend CI/CD** workflow runs tests on pull requests and performs build, security scan, image publish, and AKS deploy on `main` pushes.
-- **Backend CI/CD** workflow runs unit + integration tests, builds an immutable image, scans, pushes to ACR, and deploys to AKS on `main` pushes.
+- **Frontend CI/CD** workflow runs tests on pull requests and, on `main` pushes, builds and scans a container image, publishes it to ACR, deploys to a gated staging namespace, and then promotes the exact tag to production after a second approval.
+- **Backend CI/CD** workflow mirrors the frontend pipeline with Maven build/test stages, immutable image publish, staging deployment, and production promotion to prevent bypassing staged validations.
 
 GitHub Actions requires the following secrets or environment variables:
 
 - `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` – federated credentials for workload identity federation.
 - `ACR_NAME`, `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME` – application deployment targets.
-- `FRONTEND_HOST`, `DB_JDBC_URL`, `DB_USERNAME` – runtime configuration for Helm releases. Database credentials are sourced from Key Vault via the CSI driver.
+- `FRONTEND_HOST`, `FRONTEND_TLS_SECRET`, `FRONTEND_API_BASE` – production ingress host, TLS secret name, and backend API base path.
+- `FRONTEND_STAGING_HOST`, `FRONTEND_STAGING_TLS_SECRET`, `FRONTEND_STAGING_API_BASE` – staging ingress configuration.
+- `DB_JDBC_URL`, `DB_USERNAME`, `BACKEND_PROD_SECRET_NAME` (optional override) – production database connectivity for the backend release.
+- `DB_STAGING_JDBC_URL`, `DB_STAGING_USERNAME`, `BACKEND_STAGING_SECRET_NAME` – staging database connectivity/secret wiring.
 
 ## Terraform Modules
 - **network** – provisions the hub virtual network, subnets (system, Application Gateway, SQL), network security groups, and DNS zone links.

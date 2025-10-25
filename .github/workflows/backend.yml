@@ -21,6 +21,10 @@ env:
   REGISTRY_NAME: ${{ secrets.ACR_NAME }}
   IMAGE_NAME: backend
   WORKING_DIR: apps/backend
+  BACKEND_PROD_SECRET_NAME: ${{ secrets.BACKEND_PROD_SECRET_NAME != '' && secrets.BACKEND_PROD_SECRET_NAME || 'backend-secrets' }}
+  BACKEND_STAGING_SECRET_NAME: ${{ secrets.BACKEND_STAGING_SECRET_NAME != '' && secrets.BACKEND_STAGING_SECRET_NAME || 'backend-staging-secrets' }}
+  STAGING_NAMESPACE: backend-staging
+  PRODUCTION_NAMESPACE: backend
 
 jobs:
   test:
@@ -42,12 +46,13 @@ jobs:
         with:
           name: backend-test-reports
           path: apps/backend/target/surefire-reports
-  deploy:
+
+  build-and-publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
-    environment:
-      name: production
+    outputs:
+      image_tag: ${{ steps.build-image.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up JDK
@@ -56,7 +61,7 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - name: Build application
+      - name: Build application package
         working-directory: ${{ env.WORKING_DIR }}
         run: mvn -B clean package -DskipTests
       - name: Azure Login
@@ -66,38 +71,87 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Build Docker image
-        id: build
+        id: build-image
         run: |
           IMAGE_TAG=${GITHUB_SHA::7}
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
           echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
           docker build -t $REGISTRY_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG $WORKING_DIR
       - name: Trivy Image Scan
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.build.outputs.image_tag }}
+          image-ref: ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.build-image.outputs.image_tag }}
           format: table
           exit-code: '1'
           ignore-unfixed: true
       - name: Push image
         run: |
           az acr login --name $REGISTRY_NAME --expose-token --output tsv --query accessToken | docker login $REGISTRY_NAME.azurecr.io --username 00000000-0000-0000-0000-000000000000 --password-stdin
-          docker push $REGISTRY_NAME.azurecr.io/$IMAGE_NAME:${IMAGE_TAG}
+          docker push $REGISTRY_NAME.azurecr.io/$IMAGE_NAME:${{ steps.build-image.outputs.image_tag }}
+
+  deploy-staging:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Set AKS context
         uses: azure/aks-set-context@v4
         with:
           resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
           cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
-      - name: Deploy via Helm
+      - name: Deploy to staging
+        run: |
+          helm upgrade --install backend-staging ./apps/backend/helm \
+            --namespace ${{ env.STAGING_NAMESPACE }} \
+            --create-namespace \
+            --set fullnameOverride=backend-staging \
+            --set image.repository=$REGISTRY_NAME.azurecr.io/$IMAGE_NAME \
+            --set image.tag=${{ needs.build-and-publish.outputs.image_tag }} \
+            --set envs.DATASOURCE_URL=${{ secrets.DB_STAGING_JDBC_URL }} \
+            --set envs.DATASOURCE_USERNAME=${{ secrets.DB_STAGING_USERNAME }} \
+            --set secrets.existingSecret=${{ env.BACKEND_STAGING_SECRET_NAME }} \
+            --atomic --wait
+      - name: Verify staging rollout
+        run: kubectl rollout status deployment/backend-staging -n ${{ env.STAGING_NAMESPACE }}
+
+  deploy-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+      - name: Deploy to production
         run: |
           helm upgrade --install backend ./apps/backend/helm \
-            --namespace backend \
+            --namespace ${{ env.PRODUCTION_NAMESPACE }} \
             --create-namespace \
             --set fullnameOverride=backend \
             --set image.repository=$REGISTRY_NAME.azurecr.io/$IMAGE_NAME \
-            --set image.tag=${{ steps.build.outputs.image_tag }} \
+            --set image.tag=${{ needs.build-and-publish.outputs.image_tag }} \
             --set envs.DATASOURCE_URL=${{ secrets.DB_JDBC_URL }} \
             --set envs.DATASOURCE_USERNAME=${{ secrets.DB_USERNAME }} \
-            --set secrets.existingSecret=backend-secrets
-      - name: Verify rollout
-        run: kubectl rollout status deployment/backend -n backend
+            --set secrets.existingSecret=${{ env.BACKEND_PROD_SECRET_NAME }} \
+            --atomic --wait
+      - name: Verify production rollout
+        run: kubectl rollout status deployment/backend -n ${{ env.PRODUCTION_NAMESPACE }}

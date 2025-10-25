@@ -21,6 +21,8 @@ env:
   REGISTRY_NAME: ${{ secrets.ACR_NAME }}
   IMAGE_NAME: frontend
   WORKING_DIR: apps/frontend
+  STAGING_NAMESPACE: frontend-staging
+  PRODUCTION_NAMESPACE: frontend
 
 jobs:
   build-test:
@@ -47,12 +49,13 @@ jobs:
         with:
           name: frontend-dist
           path: apps/frontend/dist
-  deploy:
+
+  build-and-publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build-test
     runs-on: ubuntu-latest
-    environment:
-      name: production
+    outputs:
+      image_tag: ${{ steps.build-image.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -73,36 +76,87 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Build Docker image
-        id: build
+        id: build-image
         run: |
           IMAGE_TAG=${GITHUB_SHA::7}
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
           echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
           docker build -t $REGISTRY_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG $WORKING_DIR
       - name: Trivy Image Scan
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.build.outputs.image_tag }}
+          image-ref: ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.build-image.outputs.image_tag }}
           format: table
           exit-code: '1'
           ignore-unfixed: true
       - name: Push image
         run: |
           az acr login --name $REGISTRY_NAME --expose-token --output tsv --query accessToken | docker login $REGISTRY_NAME.azurecr.io --username 00000000-0000-0000-0000-000000000000 --password-stdin
-          docker push $REGISTRY_NAME.azurecr.io/$IMAGE_NAME:${IMAGE_TAG}
+          docker push $REGISTRY_NAME.azurecr.io/$IMAGE_NAME:${{ steps.build-image.outputs.image_tag }}
+
+  deploy-staging:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Set AKS context
         uses: azure/aks-set-context@v4
         with:
           resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
           cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
-      - name: Deploy via Helm
+      - name: Deploy to staging
+        run: |
+          helm upgrade --install frontend-staging ./apps/frontend/helm \
+            --namespace ${{ env.STAGING_NAMESPACE }} \
+            --create-namespace \
+            --set fullnameOverride=frontend-staging \
+            --set image.repository=$REGISTRY_NAME.azurecr.io/$IMAGE_NAME \
+            --set image.tag=${{ needs.build-and-publish.outputs.image_tag }} \
+            --set ingress.hosts[0]=${{ secrets.FRONTEND_STAGING_HOST }} \
+            --set ingress.tlsSecret=${{ secrets.FRONTEND_STAGING_TLS_SECRET }} \
+            --set config.apiBaseUrl=${{ secrets.FRONTEND_STAGING_API_BASE }} \
+            --atomic --wait
+      - name: Verify staging rollout
+        run: kubectl rollout status deployment/frontend-staging -n ${{ env.STAGING_NAMESPACE }}
+
+  deploy-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+      - name: Deploy to production
         run: |
           helm upgrade --install frontend ./apps/frontend/helm \
-            --namespace frontend \
+            --namespace ${{ env.PRODUCTION_NAMESPACE }} \
             --create-namespace \
             --set fullnameOverride=frontend \
             --set image.repository=$REGISTRY_NAME.azurecr.io/$IMAGE_NAME \
-            --set image.tag=${{ steps.build.outputs.image_tag }} \
-            --set ingress.hosts[0]=${{ secrets.FRONTEND_HOST }}
-      - name: Verify rollout
-        run: kubectl rollout status deployment/frontend -n frontend
+            --set image.tag=${{ needs.build-and-publish.outputs.image_tag }} \
+            --set ingress.hosts[0]=${{ secrets.FRONTEND_HOST }} \
+            --set ingress.tlsSecret=${{ secrets.FRONTEND_TLS_SECRET }} \
+            --set config.apiBaseUrl=${{ secrets.FRONTEND_API_BASE }} \
+            --atomic --wait
+      - name: Verify production rollout
+        run: kubectl rollout status deployment/frontend -n ${{ env.PRODUCTION_NAMESPACE }}
