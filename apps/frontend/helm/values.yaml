@@ -14,6 +14,10 @@ resources:
   limits:
     cpu: 500m
     memory: 256Mi
+startupProbe:
+  path: /
+  initialDelaySeconds: 3
+  periodSeconds: 5
 nodeSelector: {}
 tolerations: []
 affinity: {}
@@ -31,3 +35,7 @@ autoscaling:
   minReplicas: 3
   maxReplicas: 10
   cpuTargetPercentage: 60
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
