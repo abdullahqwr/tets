@@ -1,0 +1,28 @@
+{
+  "name": "cloud-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.25.0",
+    "axios": "1.6.7",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.1.5",
+    "@testing-library/react": "14.1.2",
+    "@types/react": "18.2.41",
+    "@types/react-dom": "18.2.17",
+    "@vitejs/plugin-react": "4.2.0",
+    "typescript": "5.3.3",
+    "vite": "5.0.11",
+    "vitest": "1.2.0"
+  }
+}

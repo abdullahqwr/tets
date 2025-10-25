@@ -1,0 +1,41 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-allow-frontend
+  namespace: backend
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: frontend
+          podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - protocol: TCP
+          port: 8080
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-allow-sql
+  namespace: backend
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.20.0.0/27
+      ports:
+        - protocol: TCP
+          port: 1433
+  policyTypes:
+    - Egress

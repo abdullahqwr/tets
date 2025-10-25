@@ -1,0 +1,33 @@
+fullnameOverride: ""
+replicaCount: 3
+image:
+  repository: acr.azurecr.io/frontend
+  tag: ""
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 80
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+nodeSelector: {}
+tolerations: []
+affinity: {}
+ingress:
+  enabled: true
+  className: azure/application-gateway
+  hosts:
+    - app.example.com
+  tlsSecret: web-tls
+config:
+  apiBaseUrl: "/api"
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  cpuTargetPercentage: 60

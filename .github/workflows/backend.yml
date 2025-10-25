@@ -1,0 +1,103 @@
+name: backend
+
+on:
+  pull_request:
+    paths:
+      - 'apps/backend/**'
+      - '.github/workflows/backend.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/backend/**'
+      - '.github/workflows/backend.yml'
+
+permissions:
+  id-token: write
+  contents: read
+  deployments: write
+
+env:
+  REGISTRY_NAME: ${{ secrets.ACR_NAME }}
+  IMAGE_NAME: backend
+  WORKING_DIR: apps/backend
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Run unit and integration tests
+        working-directory: ${{ env.WORKING_DIR }}
+        run: mvn -B clean verify
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: apps/backend/target/surefire-reports
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build application
+        working-directory: ${{ env.WORKING_DIR }}
+        run: mvn -B clean package -DskipTests
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Build Docker image
+        id: build
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::7}
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          docker build -t $REGISTRY_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG $WORKING_DIR
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.build.outputs.image_tag }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+      - name: Push image
+        run: |
+          az acr login --name $REGISTRY_NAME --expose-token --output tsv --query accessToken | docker login $REGISTRY_NAME.azurecr.io --username 00000000-0000-0000-0000-000000000000 --password-stdin
+          docker push $REGISTRY_NAME.azurecr.io/$IMAGE_NAME:${IMAGE_TAG}
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+      - name: Deploy via Helm
+        run: |
+          helm upgrade --install backend ./apps/backend/helm \
+            --namespace backend \
+            --create-namespace \
+            --set fullnameOverride=backend \
+            --set image.repository=$REGISTRY_NAME.azurecr.io/$IMAGE_NAME \
+            --set image.tag=${{ steps.build.outputs.image_tag }} \
+            --set envs.DATASOURCE_URL=${{ secrets.DB_JDBC_URL }} \
+            --set envs.DATASOURCE_USERNAME=${{ secrets.DB_USERNAME }} \
+            --set secrets.existingSecret=backend-secrets
+      - name: Verify rollout
+        run: kubectl rollout status deployment/backend -n backend
